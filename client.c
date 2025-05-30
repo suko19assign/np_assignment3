@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -15,13 +16,14 @@
 #define PROTO_VERSION    "1.0"
 #define MAX_NICK_LEN     12
 #define MAX_MSG_BODY     255
-#define MAX_LINE         (6 + MAX_MSG_BODY)    
+#define MAX_LINE         (6 + MAX_MSG_BODY)
 #define ARRAY_COUNT(a)   (sizeof(a) / sizeof(*(a)))
-
 
 static void fatal(const char *msg)
 {
+    fprintf(stderr, "ERROR ");
     perror(msg);
+    fflush(stderr);
     exit(EXIT_FAILURE);
 }
 
@@ -37,7 +39,8 @@ static void validate_nick(const char *nick)
     regfree(&rx);
 
     if (rc != 0) {
-        fprintf(stderr, "Nickname must match %s and be ≤ 12 chars\n", pattern);
+        fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n", pattern);
+        fflush(stderr);
         exit(EXIT_FAILURE);
     }
 }
@@ -47,7 +50,8 @@ static void split_host_port(char *arg, char **host, char **port)
 {
     char *colon = strchr(arg, ':');
     if (!colon) {
-        fprintf(stderr, "HOST:PORT expected\n");
+        fprintf(stderr, "ERROR HOST:PORT expected\n");
+        fflush(stderr);
         exit(EXIT_FAILURE);
     }
     *colon = '\0';
@@ -99,9 +103,9 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
         char c;
         ssize_t n = recv(fd, &c, 1, 0);
         if (n == 0)
-            return 0;                    /* peer closed */
+            return 0;
         if (n < 0) {
-            if (errno == EWOULDBLOCK || errno == EAGAIN)
+            if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR)
                 break;
             return -1;
         }
@@ -117,47 +121,50 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
 int main(int argc, char *argv[])
 {
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s HOST:PORT NICK\n", argv[0]);
+        fprintf(stderr, "ERROR Usage: %s HOST:PORT NICK\n", argv[0]);
+        fflush(stderr);
         return EXIT_FAILURE;
     }
 
-    /* arg parsing & validation */
     char *host, *port;
     split_host_port(argv[1], &host, &port);
     validate_nick(argv[2]);
     const char *nick = argv[2];
 
-    /* net connection */
     int sock = connect_to_server(host, port);
     make_nonblocking(sock);
     make_nonblocking(STDIN_FILENO);
 
-    /* greet / protocol handshake */
     char line[MAX_LINE + 32];
     ssize_t r;
-    /* read “Hello 1.0\n” */
     while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
-        ;                        /* wait */
-    if (r <= 0 || strncmp(line, "Hello " PROTO_VERSION, 7) != 0) {
-        fprintf(stderr, "Protocol mismatch: %s", line);
+        ;
+    if (r <= 0 || strncasecmp(line, "HELLO ", 6) != 0) {
+        fprintf(stderr, "ERROR Protocol mismatch: %s", line);
+        fflush(stderr);
+        return EXIT_FAILURE;
+    }
+    char version[16] = {0};
+    sscanf(line + 6, "%15s", version);
+    if (strcmp(version, "1") != 0 && strcmp(version, "1.0") != 0) {
+        fprintf(stderr, "ERROR Unsupported version: %s\n", version);
+        fflush(stderr);
         return EXIT_FAILURE;
     }
 
-    /* send NICK */
     dprintf(sock, "NICK %s\n", nick);
 
-    /* wait for OK/ERR */
     while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
         ;
     if (r <= 0 || strncmp(line, "OK", 2) != 0) {
         fprintf(stderr, "%s", line);
+        fflush(stderr);
         return EXIT_FAILURE;
     }
 
     printf("Connected as %s.\n", nick);
     fflush(stdout);
 
-    /*  select loop  */
     for (;;) {
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -165,24 +172,16 @@ int main(int argc, char *argv[])
         FD_SET(sock, &rfds);
         int maxfd = sock > STDIN_FILENO ? sock : STDIN_FILENO;
 
-        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0)
+        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR)
+                continue;
             fatal("select");
+        }
 
-        /*  incoming from server */
         if (FD_ISSET(sock, &rfds)) {
             while ((r = readline_nonblock(sock, line, sizeof line)) > 0) {
-                /* server sends “MSG nick text\n” or “ERROR text\n” */
                 if (strncmp(line, "MSG ", 4) == 0) {
-                    const char *msg_nick = line + 4;
-                    const char *space = strchr(msg_nick, ' ');
-                    if (!space)
-                        continue;        /* malformed */
-                    size_t nlen = space - msg_nick;
-                    /* skip message that we just wrote ourselves */
-                    if (nlen == strlen(nick) &&
-                        strncmp(msg_nick, nick, nlen) == 0)
-                        continue;
-                    printf("%.*s: %s", (int)nlen, msg_nick, space + 1);
+                    printf("%s", line);
                     fflush(stdout);
                 } else {
                     fputs(line, stderr);
@@ -191,20 +190,22 @@ int main(int argc, char *argv[])
             }
             if (r == 0) {
                 fprintf(stderr, "Server closed connection.\n");
+                fflush(stderr);
                 break;
             }
         }
 
-        /* user typed something */
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
-            char userbuf[MAX_MSG_BODY + 2];      /* + \n + \0 */
+            char userbuf[MAX_MSG_BODY + 2];
             ssize_t n = read(STDIN_FILENO, userbuf, sizeof userbuf - 1);
-            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                    continue;
                 fatal("read stdin");
+            }
             if (n <= 0)
                 continue;
             userbuf[n] = '\0';
-            /* remove trailing \n (makes it nicer locally) */
             if (userbuf[n - 1] == '\n')
                 userbuf[n - 1] = '\0';
 
@@ -226,3 +227,4 @@ int main(int argc, char *argv[])
     puts("Bye.");
     return EXIT_SUCCESS;
 }
+

@@ -10,6 +10,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define PROTO_VERSION    "1.0"
 #define MAX_NICK_LEN     12
