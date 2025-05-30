@@ -18,6 +18,7 @@
 #define MAX_LINE         (6 + MAX_MSG_BODY)    
 #define ARRAY_COUNT(a)   (sizeof(a) / sizeof(*(a)))
 
+
 static void fatal(const char *msg)
 {
     perror(msg);
