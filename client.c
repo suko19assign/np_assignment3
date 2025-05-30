@@ -5,7 +5,7 @@
 #include <netdb.h>
 #include <regex.h>
 #include <stdbool.h>
-#include <signal.h>          
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,14 +19,15 @@
 #define MAX_MSG_BODY     255
 #define MAX_LINE         (6 + MAX_MSG_BODY)
 #define ARRAY_COUNT(a)   (sizeof(a) / sizeof(*(a)))
+#define NB_AGAIN (-2)
 
 static int connected_ok = 0;
+
 static void fatal(const char *msg)
 {
     fprintf(stderr, "ERROR ");
     perror(msg);
     fflush(stderr);
-    /* exit 0 if the client was already up and running, else 1 */
     exit(connected_ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -42,8 +43,7 @@ static void validate_nick(const char *nick)
     regfree(&rx);
 
     if (rc != 0) {
-        fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n",
-                pattern);
+        fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n", pattern);
         fflush(stderr);
         exit(EXIT_FAILURE);
     }
@@ -110,8 +110,11 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
             return 0;
         if (n < 0) {
             if (errno == EWOULDBLOCK || errno == EAGAIN ||
-                errno == EINTR      || errno == EBADF)
+                errno == EINTR      || errno == EBADF) {
+                if (len == 0)
+                    return NB_AGAIN;
                 break;
+            }
             return -1;
         }
         buf[len++] = c;
@@ -125,7 +128,7 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
 /*  Main loop  */
 int main(int argc, char *argv[])
 {
-    signal(SIGPIPE, SIG_IGN);   /* never die on broken pipe */
+    signal(SIGPIPE, SIG_IGN);
 
     if (argc != 3) {
         fprintf(stderr, "ERROR Usage: %s HOST:PORT NICK\n", argv[0]);
@@ -144,7 +147,7 @@ int main(int argc, char *argv[])
 
     char line[MAX_LINE + 32];
     ssize_t r;
-    while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
+    while ((r = readline_nonblock(sock, line, sizeof line)) == NB_AGAIN)
         ;
     if (r <= 0 || strncasecmp(line, "HELLO ", 6) != 0) {
         fprintf(stderr, "ERROR Protocol mismatch: %s", line);
@@ -161,7 +164,7 @@ int main(int argc, char *argv[])
 
     dprintf(sock, "NICK %s\n", nick);
 
-    while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
+    while ((r = readline_nonblock(sock, line, sizeof line)) == NB_AGAIN)
         ;
     if (r <= 0 || strncmp(line, "OK", 2) != 0) {
         fprintf(stderr, "%s", line);
@@ -171,7 +174,7 @@ int main(int argc, char *argv[])
 
     printf("Connected as %s.\n", nick);
     fflush(stdout);
-    connected_ok = 1;  
+    connected_ok = 1;
 
     for (;;) {
         fd_set rfds;
@@ -189,14 +192,24 @@ int main(int argc, char *argv[])
         if (FD_ISSET(sock, &rfds)) {
             while ((r = readline_nonblock(sock, line, sizeof line)) > 0) {
                 if (strncmp(line, "MSG ", 4) == 0) {
-                    printf("%s", line);
+                    const char *msg_nick = line + 4;
+                    const char *space    = strchr(msg_nick, ' ');
+                    if (!space)
+                        continue;
+                    size_t nlen = (size_t)(space - msg_nick);
+                    if (nlen == strlen(nick) &&
+                        strncmp(msg_nick, nick, nlen) == 0)
+                        continue;                /* skip own echo */
+                    printf("%.*s: %s", (int)nlen, msg_nick, space + 1);
                     fflush(stdout);
                 } else {
                     fputs(line, stderr);
                     fflush(stderr);
                 }
             }
-            if (r == 0) {
+            if (r == NB_AGAIN)
+                ;
+            else if (r == 0) {
                 fprintf(stderr, "Server closed connection.\n");
                 fflush(stderr);
                 break;
