@@ -6,6 +6,7 @@
 #include <regex.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -120,6 +121,7 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
 /*  Main loop  */
 int main(int argc, char *argv[])
 {
+    signal(SIGPIPE, SIG_IGN);
     if (argc != 3) {
         fprintf(stderr, "ERROR Usage: %s HOST:PORT NICK\n", argv[0]);
         fflush(stderr);
