@@ -18,10 +18,210 @@
 #define MAX_LINE         (6 + MAX_MSG_BODY)    
 #define ARRAY_COUNT(a)   (sizeof(a) / sizeof(*(a)))
 
+static void fatal(const char *msg)
+{
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
 
+//nick validation
+static void validate_nick(const char *nick)
+{
+    static const char *pattern = "^[A-Za-z0-9_]{1,12}$";
+    regex_t rx;
+    if (regcomp(&rx, pattern, REG_EXTENDED) != 0)
+        fatal("regcomp");
+
+    int rc = regexec(&rx, nick, 0, NULL, 0);
+    regfree(&rx);
+
+    if (rc != 0) {
+        fprintf(stderr, "Nickname must match %s and be ≤ 12 chars\n", pattern);
+        exit(EXIT_FAILURE);
+    }
+}
+
+/* Parse "host:port"  */
+static void split_host_port(char *arg, char **host, char **port)
+{
+    char *colon = strchr(arg, ':');
+    if (!colon) {
+        fprintf(stderr, "HOST:PORT expected\n");
+        exit(EXIT_FAILURE);
+    }
+    *colon = '\0';
+    *host   = arg;
+    *port   = colon + 1;
+}
+
+/*  Connect using getaddrinfo  */
+static int connect_to_server(const char *host, const char *port)
+{
+    struct addrinfo hints = {.ai_family = AF_UNSPEC,
+                             .ai_socktype = SOCK_STREAM,
+                             .ai_flags = AI_ADDRCONFIG};
+    struct addrinfo *ai, *p;
+    int rc = getaddrinfo(host, port, &hints, &ai);
+    if (rc != 0)
+        fatal(gai_strerror(rc));
+
+    int sock = -1;
+    for (p = ai; p; p = p->ai_next) {
+        sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sock < 0)
+            continue;
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0)
+            break;
+        close(sock);
+        sock = -1;
+    }
+    freeaddrinfo(ai);
+
+    if (sock < 0)
+        fatal("connect");
+    return sock;
+}
+
+/* set FD to non-blocking */
+static void make_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        fatal("fcntl");
+}
+
+/* Read one line ( \n terminated ) from a non-blocking fd  */
+static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
+{
+    size_t len = 0;
+    while (len + 1 < cap) {
+        char c;
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n == 0)
+            return 0;                    /* peer closed */
+        if (n < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+                break;
+            return -1;
+        }
+        buf[len++] = c;
+        if (c == '\n')
+            break;
+    }
+    buf[len] = '\0';
+    return (ssize_t)len;
+}
+
+/*  Main loop  */
 int main(int argc, char *argv[])
 {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s HOST:PORT NICK\n", argv[0]);
         return EXIT_FAILURE;
     }
+
+    /* arg parsing & validation */
+    char *host, *port;
+    split_host_port(argv[1], &host, &port);
+    validate_nick(argv[2]);
+    const char *nick = argv[2];
+
+    /* net connection */
+    int sock = connect_to_server(host, port);
+    make_nonblocking(sock);
+    make_nonblocking(STDIN_FILENO);
+
+    /* greet / protocol handshake */
+    char line[MAX_LINE + 32];
+    ssize_t r;
+    /* read “Hello 1.0\n” */
+    while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
+        ;                        /* wait */
+    if (r <= 0 || strncmp(line, "Hello " PROTO_VERSION, 7) != 0) {
+        fprintf(stderr, "Protocol mismatch: %s", line);
+        return EXIT_FAILURE;
+    }
+
+    /* send NICK */
+    dprintf(sock, "NICK %s\n", nick);
+
+    /* wait for OK/ERR */
+    while ((r = readline_nonblock(sock, line, sizeof line)) == 0)
+        ;
+    if (r <= 0 || strncmp(line, "OK", 2) != 0) {
+        fprintf(stderr, "%s", line);
+        return EXIT_FAILURE;
+    }
+
+    printf("Connected as %s.\n", nick);
+    fflush(stdout);
+
+    /*  select loop  */
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        FD_SET(sock, &rfds);
+        int maxfd = sock > STDIN_FILENO ? sock : STDIN_FILENO;
+
+        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0)
+            fatal("select");
+
+        /*  incoming from server */
+        if (FD_ISSET(sock, &rfds)) {
+            while ((r = readline_nonblock(sock, line, sizeof line)) > 0) {
+                /* server sends “MSG nick text\n” or “ERROR text\n” */
+                if (strncmp(line, "MSG ", 4) == 0) {
+                    const char *msg_nick = line + 4;
+                    const char *space = strchr(msg_nick, ' ');
+                    if (!space)
+                        continue;        /* malformed */
+                    size_t nlen = space - msg_nick;
+                    /* skip message that we just wrote ourselves */
+                    if (nlen == strlen(nick) &&
+                        strncmp(msg_nick, nick, nlen) == 0)
+                        continue;
+                    printf("%.*s: %s", (int)nlen, msg_nick, space + 1);
+                    fflush(stdout);
+                } else {
+                    fputs(line, stderr);
+                    fflush(stderr);
+                }
+            }
+            if (r == 0) {
+                fprintf(stderr, "Server closed connection.\n");
+                break;
+            }
+        }
+
+        /* user typed something */
+        if (FD_ISSET(STDIN_FILENO, &rfds)) {
+            char userbuf[MAX_MSG_BODY + 2];      /* + \n + \0 */
+            ssize_t n = read(STDIN_FILENO, userbuf, sizeof userbuf - 1);
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+                fatal("read stdin");
+            if (n <= 0)
+                continue;
+            userbuf[n] = '\0';
+            /* remove trailing \n (makes it nicer locally) */
+            if (userbuf[n - 1] == '\n')
+                userbuf[n - 1] = '\0';
+
+            if (strcmp(userbuf, "/quit") == 0)
+                break;
+
+            if ((int)strlen(userbuf) > MAX_MSG_BODY) {
+                fprintf(stderr, "Message too long (255 max)\n");
+                fflush(stderr);
+                continue;
+            }
+
+            printf("me: %s\n", userbuf);
+            fflush(stdout);
+            dprintf(sock, "MSG %s\n", userbuf);
+        }
+    }
+    close(sock);
+    puts("Bye.");
+    return EXIT_SUCCESS;
+}
