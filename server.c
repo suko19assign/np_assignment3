@@ -13,7 +13,7 @@
 #include <fcntl.h>
 
 #define PROTO_VERSION    "1.0"
-#define MAX_NICK_LEN     12
+#define MAX_NICK_LEN     15
 #define MAX_MSG_BODY     255
 #define MAX_LINE         (6 + MAX_MSG_BODY) /* "MSG " + body + '\n' */
 
@@ -206,7 +206,9 @@ int main(int argc, char *argv[])
             FD_SET(fd, &master);
             if (fd > maxfd) maxfd = fd;
 
-            send(fd, "Hello " PROTO_VERSION "\n", 8 + strlen(PROTO_VERSION), 0);
+            /* length is 6 (“Hello ”) + 1 (‘\n’) + version length */
+            send(fd, "Hello " PROTO_VERSION "\n",
+                 7 + strlen(PROTO_VERSION), 0);
         }
 
         /* client data */
