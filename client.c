@@ -5,8 +5,8 @@
 #include <netdb.h>
 #include <regex.h>
 #include <stdbool.h>
+#include <signal.h>          
 #include <stdio.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -20,12 +20,14 @@
 #define MAX_LINE         (6 + MAX_MSG_BODY)
 #define ARRAY_COUNT(a)   (sizeof(a) / sizeof(*(a)))
 
+static int connected_ok = 0;
 static void fatal(const char *msg)
 {
     fprintf(stderr, "ERROR ");
     perror(msg);
     fflush(stderr);
-    exit(EXIT_FAILURE);
+    /* exit 0 if the client was already up and running, else 1 */
+    exit(connected_ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
 //nick validation
@@ -40,7 +42,8 @@ static void validate_nick(const char *nick)
     regfree(&rx);
 
     if (rc != 0) {
-        fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n", pattern);
+        fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n",
+                pattern);
         fflush(stderr);
         exit(EXIT_FAILURE);
     }
@@ -106,7 +109,8 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
         if (n == 0)
             return 0;
         if (n < 0) {
-            if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR)
+            if (errno == EWOULDBLOCK || errno == EAGAIN ||
+                errno == EINTR      || errno == EBADF)
                 break;
             return -1;
         }
@@ -121,7 +125,8 @@ static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
 /*  Main loop  */
 int main(int argc, char *argv[])
 {
-    signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);   /* never die on broken pipe */
+
     if (argc != 3) {
         fprintf(stderr, "ERROR Usage: %s HOST:PORT NICK\n", argv[0]);
         fflush(stderr);
@@ -166,6 +171,7 @@ int main(int argc, char *argv[])
 
     printf("Connected as %s.\n", nick);
     fflush(stdout);
+    connected_ok = 1;  
 
     for (;;) {
         fd_set rfds;
@@ -175,7 +181,7 @@ int main(int argc, char *argv[])
         int maxfd = sock > STDIN_FILENO ? sock : STDIN_FILENO;
 
         if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR || errno == EBADF)
                 continue;
             fatal("select");
         }
