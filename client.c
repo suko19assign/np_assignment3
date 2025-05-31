@@ -36,16 +36,11 @@ static void validate_nick(const char *nick)
 {
     static const char *pattern = "^[A-Za-z0-9_]{1,12}$";
     regex_t rx;
-    if (regcomp(&rx, pattern, REG_EXTENDED) != 0)
-        fatal("regcomp");
-
-    int rc = regexec(&rx, nick, 0, NULL, 0);
-    regfree(&rx);
-
+    if (regcomp(&rx, pattern, REG_EXTENDED) != 0) fatal("regcomp");
+    int rc = regexec(&rx, nick, 0, NULL, 0); regfree(&rx);
     if (rc != 0) {
         fprintf(stderr, "ERROR Nickname must match %s and be ≤ 12 chars\n", pattern);
-        fflush(stderr);
-        exit(EXIT_FAILURE);
+        fflush(stderr); exit(EXIT_FAILURE);
     }
 }
 
@@ -53,51 +48,33 @@ static void validate_nick(const char *nick)
 static void split_host_port(char *arg, char **host, char **port)
 {
     char *colon = strchr(arg, ':');
-    if (!colon) {
-        fprintf(stderr, "ERROR HOST:PORT expected\n");
-        fflush(stderr);
-        exit(EXIT_FAILURE);
-    }
-    *colon = '\0';
-    *host   = arg;
-    *port   = colon + 1;
+    if (!colon) { fprintf(stderr, "ERROR HOST:PORT expected\n"); fflush(stderr); exit(EXIT_FAILURE); }
+    *colon = '\0'; *host = arg; *port = colon + 1;
 }
 
 /*  Connect using getaddrinfo  */
 static int connect_to_server(const char *host, const char *port)
 {
-    struct addrinfo hints = {.ai_family = AF_UNSPEC,
-                             .ai_socktype = SOCK_STREAM,
-                             .ai_flags = AI_ADDRCONFIG};
+    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_ADDRCONFIG};
     struct addrinfo *ai, *p;
-    int rc = getaddrinfo(host, port, &hints, &ai);
-    if (rc != 0)
-        fatal(gai_strerror(rc));
-
+    int rc = getaddrinfo(host, port, &hints, &ai); if (rc != 0) fatal(gai_strerror(rc));
     int sock = -1;
     for (p = ai; p; p = p->ai_next) {
         sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (sock < 0)
-            continue;
-        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0)
-            break;
-        close(sock);
-        sock = -1;
+        if (sock < 0) continue;
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) break;
+        close(sock); sock = -1;
     }
-    freeaddrinfo(ai);
-
-    if (sock < 0)
-        fatal("connect");
-    return sock;
+    freeaddrinfo(ai); if (sock < 0) fatal("connect"); return sock;
 }
 
 /* set FD to non-blocking */
 static void make_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-        fatal("fcntl");
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) fatal("fcntl");
 }
+
 
 /* Read one line ( \n terminated ) from a non-blocking fd  */
 static ssize_t readline_nonblock(int fd, char *buf, size_t cap)
